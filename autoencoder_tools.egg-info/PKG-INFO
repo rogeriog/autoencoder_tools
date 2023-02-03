@@ -1,0 +1,16 @@
+Metadata-Version: 2.1
+Name: autoencoder-tools
+Version: 0.0.1
+Summary: A package to setup and optimize autoencoders using keras.
+Author: Rogerio Gouvea
+Author-email: <rogeriog.em@gmail.com>
+Keywords: autoencoder,python,keras,machine learning,hyperparameters
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: Unix
+Description-Content-Type: text/markdown
+
+
+# Autoencoder Tools
+A simple package to handle autoencoders in keras easily, this was developed
+particularly for an autoencoder to be used along with MODNet, a machine 
+learning tool for description of materials properties.
