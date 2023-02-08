@@ -6,6 +6,8 @@ from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import ReLU, Conv1D, Reshape, Flatten
 from tensorflow.keras.layers import BatchNormalization, Conv1DTranspose
 from tensorflow.keras.optimizers import Adam
+from keras.models import load_model
+
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 from scipy.spatial.distance import correlation, cosine
@@ -105,7 +107,7 @@ def HyperParameterTestEncoding(
 
 def TestEncoding(prefix_name : str = 'Model', 
         dataset : pd.DataFrame = None,
-        compress_ratio : list = None,
+        compress_ratio : float = 0.5,
         architecture : dict = {'arch':'default'},
         savedir : str = '',
         logfile : str = 'EncoderResults.txt', 
@@ -114,8 +116,46 @@ def TestEncoding(prefix_name : str = 'Model',
         batch_size : int = 16, 
         random_state : int = 1,
         loss : str = 'mse',
+        return_results : bool = False,
+        show_summary : bool = True,
         **kwargs
-        ):     
+        ):    
+    ''' 
+    Parameters
+    ----------
+    prefix_name : str
+        Prefix of the model name.
+    dataset : pd.DataFrame
+        Dataset to encode.
+    compress_ratio : float
+        Ratio of the number of neurons in the bottleneck layer.
+    architecture : dict
+        Architecture of the encoder.
+    savedir : str
+        Directory where to save the results.
+    logfile : str
+        Logfile name.
+    epochs : int
+        Number of epochs.
+    learning_rate : float
+        Learning rate.
+    batch_size : int
+        Batch size.
+    random_state : int
+        Random state.
+    loss : str
+        Loss function.
+    return_results : bool
+        Whether to return the results.
+    show_summary : bool
+        Whether to show the summary of the model.
+    **kwargs
+        Additional parameters for the architecture.
+    Returns
+    -------
+    results : list
+        Results of the encoding.
+    ''' 
     if 'n_factor' not in architecture.keys():
         architecture['n_factor'] = ''
     if prefix_name:
@@ -166,12 +206,6 @@ def TestEncoding(prefix_name : str = 'Model',
                 text+=f"{entries[i]:>18}|"
             text+='\n'
             f.write(text)
-
-    ## check if encoder already exists in folder, in this case goes to next 
-    encoder_path=savedir+f'{name_encoder}_AutoEncoder.h5'
-    if os.path.exists(encoder_path):
-        print(f'File {name_encoder}_AutoEncoder.h5 exists in folder already, skiping this calculation.')
-        return 0
     
     results=[]
     if architecture['arch'] == 'default': 
@@ -233,27 +267,44 @@ def TestEncoding(prefix_name : str = 'Model',
         model = create_autoencoder(input_shape=n_inputs, 
                                    layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate)
+
+    ## check if encoder already exists in folder, in this case goes to next 
+    encoder_path=savedir+f'{name_encoder}_AutoEncoder.h5'
+    LoadedModel=False
+    if os.path.exists(encoder_path):
+        print(f'File {name_encoder}_AutoEncoder.h5 exists in folder already, skiping this calculation.')
+        if not return_results:
+            return 0
+        else: # load existing model to return results
+            LoadedModel=True
+            model = load_model(encoder_path)
+
     FailedTraining=False
-    try:
-        # fit the autoencoder model to reconstruct input
-        history = model.fit(X_train, X_train, epochs=epochs, batch_size=batch_size,
-                            verbose=2, validation_data=(X_test,X_test))
-        # plot loss
-        print(f"COMPRESSED VECTOR SIZE: {n_bottleneck}")    
-        pyplot.plot(history.history['loss'], label='train')
-        pyplot.plot(history.history['val_loss'], label='test')
-        print(f"Loss in the autoencoder: {history.history['val_loss'][-1]}")
-        mse_error_train=history.history['loss'][-1]
-        mse_error_val=history.history['val_loss'][-1]
-    except Exception as e:
-        print(e)
-        print("Training of this model failed.")
+    if not LoadedModel:
+        try:
+            # fit the autoencoder model to reconstruct input
+            history = model.fit(X_train, X_train, epochs=epochs, batch_size=batch_size,
+                                verbose=2, validation_data=(X_test,X_test))
+            # plot loss
+            print(f"COMPRESSED VECTOR SIZE: {n_bottleneck}")    
+            pyplot.plot(history.history['loss'], label='train')
+            pyplot.plot(history.history['val_loss'], label='test')
+            print(f"Loss in the autoencoder: {history.history['val_loss'][-1]}")
+            mse_error_train=history.history['loss'][-1]
+            mse_error_val=history.history['val_loss'][-1]
+        except Exception as e:
+            print(e)
+            print("Training of this model failed.")
+            mse_error_train='--'
+            mse_error_val='--'
+            FailedTraining=True
+    else: # if model was loaded
         mse_error_train='--'
         mse_error_val='--'
-        FailedTraining=True
     architecture_details=str(architecture['n_factor'])+architecture['arch']
     results=[ architecture_details, loss, batch_size, epochs, learning_rate,
             np.round(compress_ratio,4), n_bottleneck, mse_error_train, mse_error_val]
+    
     if not FailedTraining:
         results_model=get_results_model(model,X_test)
         pyplot.legend()
@@ -262,18 +313,19 @@ def TestEncoding(prefix_name : str = 'Model',
         # save full autoencoder model (without the decoder)
         model.save(savedir+f'{name_encoder}_AutoEncoder.h5')
         # define and save an encoder model (without the decoder)
-        encoder,decoder = get_encoder_decoder(model, "bottleneck")
-        ## no need to save it loads corrupted after
-        # encoder.save(f'{name_encoder}_encoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
-        # define and save a decoder model (without the decoder)
-        ## no need to save it loads corrupted after
-        # decoder.save(f'{name_encoder}_decoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
-        print("Full AutoEncoder")
-        model.summary()
-        print("Encoder")
-        encoder.summary()
-        print("Decoder")
-        decoder.summary() 
+        if show_summary:
+            encoder,decoder = get_encoder_decoder(model, "bottleneck")
+            ## no need to save it loads corrupted after
+            # encoder.save(f'{name_encoder}_encoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
+            # define and save a decoder model (without the decoder)
+            ## no need to save it loads corrupted after
+            # decoder.save(f'{name_encoder}_decoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
+            print("Full AutoEncoder")
+            model.summary()
+            print("Encoder")
+            encoder.summary()
+            print("Decoder")
+            decoder.summary() 
     else:
         results_model=['--']*6        
     results+=results_model
@@ -288,6 +340,21 @@ def TestEncoding(prefix_name : str = 'Model',
                 #print(results[i],isinstance(results[i], numbers.Number))
         f.write(text)
         f.write('\n')
+    # transform this previous results variable in a dictionary with the variable names as keys:
+    results_dict={ 'architecture_details':architecture_details, 'loss':loss, 'batch_size':batch_size,
+                  'epochs':epochs, 'learning_rate':learning_rate, 'compress_ratio':np.round(compress_ratio,4),
+                  'n_bottleneck':n_bottleneck, 'mse_error_train':mse_error_train, 'mse_error_val':mse_error_val}
+    # results model dict has the get_results_model results
+    results_model_dict = {'correlation':results_model[0],
+                            'cosine':results_model[1],
+                            'MAE':results_model[2],
+                            'RMSE':results_model[3],
+                            'r2':results_model[4],
+                            'RMSE0':results_model[5],
+                            }
+    results_dict.update(results_model_dict)
+    if return_results:
+        return results_dict
 
 
 def create_autoencoder(input_shape : int = None,
