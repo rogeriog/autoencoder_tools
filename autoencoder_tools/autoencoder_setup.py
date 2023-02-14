@@ -4,10 +4,15 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import ReLU, Conv1D, Reshape, Flatten
-from tensorflow.keras.layers import BatchNormalization, Conv1DTranspose
+from tensorflow.keras.layers import BatchNormalization, Conv1DTranspose, Lambda
 from tensorflow.keras.optimizers import Adam
-from keras.models import load_model
+from tensorflow.keras import backend as K
 
+from keras.losses import binary_crossentropy, log_cosh, mean_squared_error
+from keras.losses import mean_squared_error as keras_mean_squared_error
+from keras.backend import random_normal, exp, mean, square, shape
+from keras.models import load_model
+from tensorflow import convert_to_tensor
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 from scipy.spatial.distance import correlation, cosine
@@ -20,20 +25,44 @@ matplotlib.use('Agg')
 import tensorflow as tf
 from typing import List
 
+# Disable eager execution because of symbolic type problems 
+from tensorflow.python.framework.ops import disable_eager_execution
+disable_eager_execution()
+
 # Set the random seed in TensorFlow
 tf.random.set_seed(42)
-def get_encoder_decoder(model, central_layer_name):
-    layer = model.get_layer(central_layer_name)
-    encoder_input = Input(model.input_shape[1:], name='input_input') # to avoid same name error
-    #encoder_input = Input(shape=model.input_shape[1:])
-    encoder_output = encoder_input
-    decoder_input = Input(layer.output_shape[1:])
-    #decoder_input = Input(shape=layer.output_shape[1:])
-    decoder_output = decoder_input
 
+
+def get_encoder_decoder(model, 
+                        central_layer_name,
+                        mode='default'):
+    layer = model.get_layer(central_layer_name)
+    # encoder_input = Input(model.input_shape[1:] , name='input_input') # to avoid same name error
+    encoder_input = Input(model.input_shape[-1] , name='input_input') # to avoid same name error
+    #encoder_input = Input(shape=model.n_inputs[1:])
+    # decoder_input = Input(layer.output_shape[1:])
+    decoder_input = Input(layer.output_shape[-1])
+
+    #decoder_input = Input(shape=layer.output_shape[1:])
+    
+    # encoder/decoder starts with the input layer
+    encoder_output = encoder_input
+    decoder_output = decoder_input
+    # encoder/decoder goes through the layers appending each one.
     encoder = True
     for layer in model.layers:
         if encoder:
+            # ## special case for VAE
+            # if layer.name == 'bottleneck_zmean':
+            #     z_mean = model.get_layer('bottleneck_zmean')
+            #     z_log_var = model.get_layer('bottleneck_zlog')
+            #     vae_bottleneck = Lambda(sampling,name='bottleneck')([z_mean, z_log_var])
+            #     encoder_output = encoder_output(vae_bottleneck)
+            # elif layer.name == 'bottleneck_zlog':
+            #     pass
+            # elif layer.name == 'bottleneck':
+            #     encoder = False
+            # else:
             encoder_output = layer(encoder_output)
         else:
             decoder_output = layer(decoder_output)
@@ -44,6 +73,15 @@ def get_encoder_decoder(model, central_layer_name):
     decoder_model = Model(decoder_input, decoder_output)
 
     return encoder_model, decoder_model
+
+# Sampling function for VAE
+def sampling(args):
+    z_mean, z_log_var = args
+
+    #epsilon = random_normal(shape=(batch_size, latent_dim))
+    epsilon = random_normal(shape=shape(z_mean), mean=0.0, stddev=1.0)
+    random_sample = z_mean + exp(z_log_var / 2) * epsilon
+    return random_sample
 
 def get_results_model(model,Xtest):
     y=Xtest
@@ -69,7 +107,7 @@ def get_results_model(model,Xtest):
     resultsmodel = [ float(r) for r in resultsmodel]
     return resultsmodel
 
-def HyperParameterTestEncoding(
+def hypertune_autoencoder(
         dataset : pd.DataFrame = None,
         prefix_name : str = None,
         bottleneck_ratios : List[float] = None, 
@@ -92,7 +130,7 @@ def HyperParameterTestEncoding(
                 # Build and compile the autoencoder model with the current set of hyperparameters
                 if savedir[-1] != '/':
                     savedir+='/'
-                TestEncoding( prefix_name = prefix_name,
+                train_autoencoder( prefix_name = prefix_name,
                               dataset = dataset,
                               compress_ratio = bottleneck_ratio,
                               architecture=architecture,
@@ -105,7 +143,7 @@ def HyperParameterTestEncoding(
             
 
 
-def TestEncoding(prefix_name : str = 'Model', 
+def train_autoencoder(prefix_name : str = 'Model', 
         dataset : pd.DataFrame = None,
         compress_ratio : float = 0.5,
         architecture : dict = {'arch':'default'},
@@ -117,45 +155,45 @@ def TestEncoding(prefix_name : str = 'Model',
         random_state : int = 1,
         loss : str = 'mse',
         return_results : bool = False,
-        show_summary : bool = True,
+        test_size_ratio : float = 0.1,
+        #  show_summary : bool = True,
         **kwargs
         ):    
     ''' 
     Parameters
     ----------
-    prefix_name : str
-        Prefix of the model name.
-    dataset : pd.DataFrame
-        Dataset to encode.
-    compress_ratio : float
-        Ratio of the number of neurons in the bottleneck layer.
-    architecture : dict
-        Architecture of the encoder.
-    savedir : str
-        Directory where to save the results.
-    logfile : str
-        Logfile name.
-    epochs : int
-        Number of epochs.
-    learning_rate : float
-        Learning rate.
-    batch_size : int
-        Batch size.
-    random_state : int
-        Random state.
-    loss : str
-        Loss function.
-    return_results : bool
-        Whether to return the results.
-    show_summary : bool
-        Whether to show the summary of the model.
-    **kwargs
-        Additional parameters for the architecture.
+    prefix_name : str, optional
+        Name of the model, by default 'Model'
+    dataset : pd.DataFrame, optional
+        Data to train the model, by default None
+    compress_ratio : float, optional
+        Ratio of the compress layer, by default 0.5
+    architecture : dict, optional
+        Architecture of the model, by default {'arch':'default'}
+    savedir : str, optional
+        Directory to save the model, by default ''
+    logfile : str, optional
+        Logfile to save the results, by default 'EncoderResults.txt'
+    epochs : int, optional
+        Number of epochs, by default 100
+    learning_rate : float, optional
+        Learning rate, by default 0.001
+    batch_size : int, optional
+        Batch size, by default 16
+    random_state : int, optional
+        Random state, by default 1
+    loss : str, optional
+        Loss function to use, by default 'mse'
+    return_results : bool, optional
+        Return results, by default False
+    test_size_ratio : float, optional
+        Test size ratio, by default 0.1
     Returns
     -------
-    results : list
-        Results of the encoding.
+    model, results
+        Returns the model and the results if return_results is True
     ''' 
+
     if 'n_factor' not in architecture.keys():
         architecture['n_factor'] = ''
     if prefix_name:
@@ -185,7 +223,10 @@ def TestEncoding(prefix_name : str = 'Model',
         f.write(text)
     # split into train test sets
     X_train, X_test, _, _ = train_test_split(Xtoencode, np.zeros(Xtoencode.shape[0]), 
-                                             test_size=0.1, random_state=random_state)
+                                             test_size=test_size_ratio, random_state=random_state)
+    # save the id of the train and test sets in text files
+    np.savetxt(savedir+"train_ids.txt", X_train.index.values, fmt='%s')
+    np.savetxt(savedir+"test_ids.txt", X_test.index.values, fmt='%s')
     # scale data
     t = MinMaxScaler()
     t.fit(X_train)
@@ -210,52 +251,61 @@ def TestEncoding(prefix_name : str = 'Model',
     results=[]
     if architecture['arch'] == 'default': 
         n_bottleneck=int(n_inputs*compress_ratio)
-        model = create_autoencoder(input_shape=n_inputs,
+        model = create_autoencoder(n_inputs=n_inputs,
                                    layers_structure= [n_inputs*2, int(n_bottleneck) ],
                                    loss = loss, lr=learning_rate) 
     elif architecture['arch'] == '2n_m2nb_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [n_inputs*2, int((n_inputs*2+n_bottleneck)/2), 
                            int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate) 
     elif architecture['arch'] == '2n_n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [n_inputs*2, n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate) 
     elif architecture['arch'] == 'n_2n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [n_inputs, 2*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate) 
     elif architecture['arch'] == '3n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [3*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate)
     elif architecture['arch'] == 'n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate)
     elif architecture['arch'] == '2n_3n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [2*n_inputs, 3*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure,
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure,
                                    loss = loss )
     elif architecture['arch'] == '3n_2n_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [3*n_inputs, 2*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure, 
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
                                    loss = loss, lr=learning_rate)
     elif architecture['arch'] == '2n_conv2_b':
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [2*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, layers_structure=layers_structure, 
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
                                    loss = loss, lr=learning_rate, type_architecture = 'convoluted',
                                    conv_reduction = 2,
                                    )
+    elif architecture['arch'] == 'custom_VAE':
+         ## this is needed to use custom VAE because of symbolic operations
+        n_bottleneck=int(n_inputs*compress_ratio)
+        layers_structure= [int(architecture['n_factor']*n_inputs), int(n_bottleneck) ]  
+        model, vae_loss = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
+                                   loss = loss, lr=learning_rate, type_architecture = 'VAE',
+                                   )
+        
+
 
     elif architecture['arch'] == 'custom_n_b':
         class TestFailed(Exception):
@@ -264,7 +314,7 @@ def TestEncoding(prefix_name : str = 'Model',
             raise TestFailed("you need to specify a n_factor in architecture to use custom_n_b.")
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [architecture['n_factor']*n_inputs, int(n_bottleneck) ]  
-        model = create_autoencoder(input_shape=n_inputs, 
+        model = create_autoencoder(n_inputs=n_inputs, 
                                    layers_structure=layers_structure,
                                    loss = loss, lr=learning_rate)
 
@@ -277,7 +327,8 @@ def TestEncoding(prefix_name : str = 'Model',
             return 0
         else: # load existing model to return results
             LoadedModel=True
-            model = load_model(encoder_path)
+            # model.get_layer('dense_1')
+            model = load_model(encoder_path, custom_objects={'vae_loss': vae_loss})
 
     FailedTraining=False
     if not LoadedModel:
@@ -313,19 +364,20 @@ def TestEncoding(prefix_name : str = 'Model',
         # save full autoencoder model (without the decoder)
         model.save(savedir+f'{name_encoder}_AutoEncoder.h5')
         # define and save an encoder model (without the decoder)
-        if show_summary:
-            encoder,decoder = get_encoder_decoder(model, "bottleneck")
-            ## no need to save it loads corrupted after
-            # encoder.save(f'{name_encoder}_encoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
-            # define and save a decoder model (without the decoder)
-            ## no need to save it loads corrupted after
-            # decoder.save(f'{name_encoder}_decoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
-            print("Full AutoEncoder")
-            model.summary()
-            print("Encoder")
-            encoder.summary()
-            print("Decoder")
-            decoder.summary() 
+        # if show_summary:
+        #     encoder,decoder = get_encoder_decoder(model, "bottleneck")
+
+        #     ## no need to save it loads corrupted after
+        #     # encoder.save(f'{name_encoder}_encoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
+        #     # define and save a decoder model (without the decoder)
+        #     ## no need to save it loads corrupted after
+        #     # decoder.save(f'{name_encoder}_decoder_compressratio_{np.round(n_bottleneck_ratio,4)}.h5')
+        #     print("Full AutoEncoder")
+        #     model.summary()
+        #     print("Encoder")
+        #     encoder.summary()
+        #     print("Decoder")
+        #     decoder.summary() 
     else:
         results_model=['--']*6        
     results+=results_model
@@ -357,20 +409,20 @@ def TestEncoding(prefix_name : str = 'Model',
         return results_dict
 
 
-def create_autoencoder(input_shape : int = None,
+def create_autoencoder(n_inputs : int = None,
                        layers_structure : list = None,
                        loss : str = 'mse',
                        lr : float = 0.001,
                        type_architecture : str = 'default',
                        conv_reduction : int = 2, ## only if type_architecture is convoluted
                        ):
-    
+
+
     # Define the number of layers and number of neurons in each layer
     neurons_per_layer = layers_structure # [64, 32, 16, 8]
     num_layers = len(neurons_per_layer)
-    n_inputs=input_shape
     # The input layer is the same as the output layer
-    input_layer = Input(shape=(n_inputs,))
+    input_layer = Input(shape=(n_inputs,),name='input_enc')
 
     # Create the encoder layers
     # encoder_layers = []
@@ -431,15 +483,85 @@ def create_autoencoder(input_shape : int = None,
                 d = BatchNormalization()(d)
                 d = ReLU()(d)
         
+    elif type_architecture == 'VAE' :
+        for i in range(num_layers-1):
+            if i == 0:
+                e = Dense(neurons_per_layer[i], name=f'dense_enc{i}')(input_layer)
+                e = BatchNormalization()(e)
+                e = ReLU()(e)
+                # encoder_layers.append(Dense(neurons_per_layer[i], activation='relu')(BatchNormalization()(input_layer)))
+            else:
+                e = Dense(neurons_per_layer[i], name=f'dense_enc{i}')(e)
+                e = BatchNormalization()(e)
+                e = ReLU()(e)
+                # encoder_layers.append(Dense(neurons_per_layer[i], activation='relu')(BatchNormalization()(encoder_layers[i-1])))
+                # encoder_layers.append(BatchNormalization()(Dense(neurons_per_layer[i], activation='relu')(encoder_layers[i-1])))
 
-    # The output layer is the same as the input layer
-    # output_layer = Dense(n_inputs, activation='linear')(decoder_layers[-1])
-    output_layer = Dense(n_inputs, activation='linear')(d)
+        # Mean and variance of latent space
+        latent_dim = neurons_per_layer[-1]
+        z_mean = Dense(latent_dim, name='bottleneck_zmean')(e)
+        z_log_var = Dense(latent_dim, name='bottleneck_zlog')(e)
 
-    # Create the autoencoder model
-    autoencoder = Model(inputs=input_layer, outputs=output_layer)
+        # Use sampling function to sample from latent space
+        encoder_output = Lambda(sampling,name='bottleneck')([z_mean, z_log_var])
+        encoder = Model(input_layer, encoder_output, name="encoder_model")
 
+        decoder_input = Input(shape=(latent_dim,),name='input_dec') 
+        # Create the decoder layers
+        # decoder_layers = []
+        for i in range(num_layers-1, -1, -1):   
+            if i == num_layers-1:
+                d = Dense(neurons_per_layer[i], name=f'dense_dec{i}')(decoder_input)
+                d = BatchNormalization()(d)
+                d = ReLU()(d)
+            else:
+                d = Dense(neurons_per_layer[i], name=f'dense_dec{i}')(d)
+                d = BatchNormalization()(d)
+                d = ReLU()(d)        
+
+        # The output layer is the same as the input layer
+        # output_layer = Dense(n_inputs, activation='linear')(decoder_layers[-1])
+        decoder_output = Dense(n_inputs, activation='linear', name='outputlayer')(d)
+        decoder = Model(inputs=decoder_input, outputs=decoder_output, name="decoder_model")
+        # Create the autoencoder model
+        autoencoder_output = decoder(encoder_output)   
+        autoencoder = Model(inputs=input_layer, outputs=autoencoder_output, name="VAE")
+    
     # Compile the model
-    autoencoder.compile( optimizer=Adam(learning_rate=lr), loss = loss)
-    autoencoder.summary()
-    return autoencoder
+    if type_architecture == 'VAE' :
+        # Add a custom loss function to account for the KL divergence
+        def vae_loss(x, x_decoded_mean):
+            ## Losses supported are binary_crossentropy, mean_squared_error, and log_cosh
+            if loss == 'binary_crossentropy':
+                xent_loss = binary_crossentropy(x, x_decoded_mean)
+            elif loss == 'mean_squared_error' or loss == 'mse':
+                xent_loss = keras_mean_squared_error(x, x_decoded_mean)
+            elif loss == 'log_cosh' or loss == 'logcosh':
+                xent_loss = log_cosh(x, x_decoded_mean)
+            else:
+                raise ValueError('Unsupported loss function for VAE')
+            kl_loss = -5e-4 * K.mean(
+                1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
+            return xent_loss + kl_loss
+        # save vae_loss to a file
+        # import dill as pickledill
+        # pickledill.dump(vae_loss,open(f"./VAE_{loss}_loss.pkl","wb"))
+        ## still error cannot pickle 'tensorflow.python.client._pywrap_tf_session.TF_Operation' object
+        
+        # kl_loss = -5e-4 * mean( 1 + z_log_var - square(z_mean) - exp(z_log_var), axis=-1)
+        # vae_loss = xent_loss + kl_loss
+        # autoencoder.add_loss(vae_loss)
+        autoencoder.compile(optimizer='adam', loss=vae_loss)
+        autoencoder.summary()
+        return autoencoder, vae_loss
+        
+    else:
+        autoencoder.compile_model( optimizer=Adam(learning_rate=lr), loss = loss)
+        autoencoder.summary()
+        return autoencoder
+
+## for compatibility with previous version
+TestEncoding = train_autoencoder
+HyperParameterTestEncoding = hypertune_autoencoder
+
+        

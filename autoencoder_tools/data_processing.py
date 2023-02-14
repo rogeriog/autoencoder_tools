@@ -5,6 +5,7 @@ import pickle
 from keras.models import load_model
 from .autoencoder_setup import get_encoder_decoder, get_results_model
 
+from keras.models import Model
 def filter_features_dataset(dataset : Union[pd.DataFrame,MODData] = None,
         allowed_features_file : str = None,
         mode : str = 'default',
@@ -53,6 +54,10 @@ def encode_dataset(dataset : Union[pd.DataFrame,MODData] = None,
         save_name : str = None,
         feat_prefix : str = "EncodedFeat",
         mode : str = "default",
+        custom_objs : dict = None, 
+        compile_model : bool = True,
+        # for example: {'vae_loss':function}
+        encoder_type : str = "regular",
                   ):
     if mode == "default":
         Xtoencode=dataset
@@ -66,21 +71,44 @@ def encode_dataset(dataset : Union[pd.DataFrame,MODData] = None,
     t=pickle.load(open(scaler,"rb"))
     Xtoencode = t.transform(Xtoencode)
     print(Xtoencode)
-    autoencoder = load_model(autoencoder)
-    # if there is conflicting name this line may fix it.
-    # The name "input_1" is used 2 times in the model. All layer names should be unique.
-    # autoencoder.layers[0]._name='changed_input'
-    encoder,decoder = get_encoder_decoder(autoencoder, "bottleneck")
-    Xencoded=encoder.predict(Xtoencode)
+    if custom_objs is not None:
+        autoencoder = load_model(autoencoder,
+                                custom_objects=custom_objs)
+    else:
+        if compile_model == True:
+            autoencoder = load_model(autoencoder)
+        else:
+            autoencoder = load_model(autoencoder, compile=False)
+    if encoder_type == "regular":
+        # if there is conflicting name this line may fix it.
+        # The name "input_1" is used 2 times in the model. All layer names should be unique.
+        # autoencoder.layers[0]._name='changed_input'
+        encoder,decoder = get_encoder_decoder(autoencoder, "bottleneck")
+        Xencoded=encoder.predict(Xtoencode)
+        
+        Xencoded=pd.DataFrame(Xencoded, columns=[f"{feat_prefix}|{idx}" for idx in range(Xencoded.shape[1])],
+                            index=indexes)
+        if mode == "default":
+            pickle.dump(Xencoded, open(save_name,'wb'))
+        elif mode == "MODData":
+            dataset.df_featurized=Xencoded
+            dataset.save(save_name)
+        print(Xencoded)
+        print('Final shape:', Xencoded.shape)
+        print('Summary of results:', get_results_model(autoencoder,Xtoencode))
+        return Xencoded
+    elif encoder_type == "variational":
+        encoder_layer_model = Model(inputs=autoencoder.input, outputs=autoencoder.layers[-2].output)
+        Xencoded = encoder_layer_model.predict(Xtoencode, verbose=False)
+        Xencoded=pd.DataFrame(Xencoded, columns=[f"{feat_prefix}|{idx}" for idx in range(Xencoded.shape[1])],
+                    index=indexes)
+        if mode == "default":
+            pickle.dump(Xencoded, open(save_name,'wb'))
+        elif mode == "MODData":
+            dataset.df_featurized=Xencoded
+            dataset.save(save_name)
+        print(Xencoded)
+        print('Final shape:', Xencoded.shape)
+        print('Summary of results:', get_results_model(autoencoder,Xtoencode))
+        return Xencoded
     
-    Xencoded=pd.DataFrame(Xencoded, columns=[f"{feat_prefix}|{idx}" for idx in range(Xencoded.shape[1])],
-                          index=indexes)
-    if mode == "default":
-        pickle.dump(Xencoded, open(save_name,'wb'))
-    elif mode == "MODData":
-        dataset.df_featurized=Xencoded
-        dataset.save(save_name)
-    print(Xencoded)
-    print('Final shape:', Xencoded.shape)
-    print('Summary of results:', get_results_model(autoencoder,Xtoencode))
-    return Xencoded
