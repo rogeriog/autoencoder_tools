@@ -72,8 +72,13 @@ def encode_dataset(dataset : Union[pd.DataFrame,MODData] = None,
     Xtoencode = t.transform(Xtoencode)
     print(Xtoencode)
     if custom_objs is not None:
-        autoencoder = load_model(autoencoder,
-                                custom_objects=custom_objs)
+        if compile_model == True:
+            autoencoder = load_model(autoencoder, 
+                                    custom_objects=custom_objs)
+        else:
+            autoencoder = load_model(autoencoder, 
+                                    custom_objects=custom_objs,
+                                    compile=False)
     else:
         if compile_model == True:
             autoencoder = load_model(autoencoder)

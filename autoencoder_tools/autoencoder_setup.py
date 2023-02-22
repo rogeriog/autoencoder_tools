@@ -4,15 +4,12 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import ReLU, Conv1D, Reshape, Flatten
-from tensorflow.keras.layers import BatchNormalization, Conv1DTranspose, Lambda
+from tensorflow.keras.layers import BatchNormalization, Conv1DTranspose, Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
+import datetime
 
-from keras.losses import binary_crossentropy, log_cosh, mean_squared_error
-from keras.losses import mean_squared_error as keras_mean_squared_error
-from keras.backend import random_normal, exp, mean, square, shape
 from keras.models import load_model
-from tensorflow import convert_to_tensor
 import numpy as np
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 from scipy.spatial.distance import correlation, cosine
@@ -27,7 +24,7 @@ from typing import List
 
 # Disable eager execution because of symbolic type problems 
 from tensorflow.python.framework.ops import disable_eager_execution
-disable_eager_execution()
+# disable_eager_execution()
 
 # Set the random seed in TensorFlow
 tf.random.set_seed(42)
@@ -74,15 +71,61 @@ def get_encoder_decoder(model,
 
     return encoder_model, decoder_model
 
-# Sampling function for VAE
-def sampling(args):
-    z_mean, z_log_var = args
+# # VAE sampling function
+# def sampling(args):
+#     z_mean, z_log_var = args
 
-    #epsilon = random_normal(shape=(batch_size, latent_dim))
-    epsilon = random_normal(shape=shape(z_mean), mean=0.0, stddev=1.0)
-    random_sample = z_mean + exp(z_log_var / 2) * epsilon
-    return random_sample
+#     batch = tf.shape(z_mean)[0]
+#     dim = tf.shape(z_mean)[1]
+#     epsilon = tf.random.normal(shape=(batch, dim))
+#     random_sample = z_mean + tf.exp(0.5 * z_log_var) * epsilon
+#     return random_sample
 
+from tensorflow.keras.layers import Layer
+from tensorflow.keras import backend as K
+import tensorflow as tf
+
+class SamplingLayer(Layer):
+    def __init__(self, name='sampling', **kwargs):
+        super(SamplingLayer, self).__init__(name=name, **kwargs)
+
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = tf.shape(z_mean)[0]
+        dim = tf.shape(z_mean)[1]
+        epsilon = tf.random.normal(shape=(batch, dim))
+        random_sample = z_mean + tf.exp(0.5 * z_log_var) * epsilon
+        return random_sample
+
+class VAELossLayer(Layer):
+    def __init__(self, loss, kl_loss_coeff=1.0, **kwargs):
+        super(VAELossLayer, self).__init__(**kwargs)
+        self.loss = loss
+        self.kl_loss_coeff = kl_loss_coeff
+
+    def call(self, inputs):
+        x, x_decoded_mean, z_mean, z_log_var = inputs
+        if self.loss == 'binary_crossentropy':
+            xent_loss = tf.keras.losses.binary_crossentropy(x, x_decoded_mean)
+        elif self.loss == 'mean_squared_error' or self.loss == 'mse':
+            xent_loss = tf.keras.losses.mean_squared_error(x, x_decoded_mean)
+        elif self.loss == 'huber' or self.loss == 'logcosh':
+            xent_loss = tf.reduce_mean(tf.math.log(tf.math.cosh(x - x_decoded_mean)))
+        else:
+            raise ValueError('Unsupported loss function for VAE')
+        
+        kl_loss = 1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var)
+        kl_loss = tf.reduce_sum(kl_loss, axis=-1)
+        kl_loss *= -0.5
+        vae_loss = tf.keras.backend.mean(xent_loss + self.kl_loss_coeff * kl_loss)
+        self.add_loss(vae_loss)
+        return x_decoded_mean
+
+    def get_config(self):
+        config = super(VAELossLayer, self).get_config()
+        config.update({'loss': self.loss, 'kl_loss_coeff': self.kl_loss_coeff})
+        return config
+        
 def get_results_model(model,Xtest):
     y=Xtest
     ypred=model.predict(Xtest)
@@ -141,7 +184,14 @@ def hypertune_autoencoder(
                               savedir=savedir+f"{prefix_name}_{architecture['arch']}",
                              )
             
-
+# def train_generator(batch_size):
+#     # write your data generator here that yields batches of training data
+#     # example: for x_train, y_train in your_data_generator(batch_size):
+#     #            yield x_train, y_train
+#     while True:
+#         # generate batches of training data
+#         x_train, y_train = your_data_generator(batch_size)
+#         yield x_train, y_train
 
 def train_autoencoder(prefix_name : str = 'Model', 
         dataset : pd.DataFrame = None,
@@ -155,6 +205,7 @@ def train_autoencoder(prefix_name : str = 'Model',
         random_state : int = 1,
         loss : str = 'mse',
         return_results : bool = False,
+        get_test_results : bool = True, ## False to avoid memory errors of tensorflow in genetic
         test_size_ratio : float = 0.1,
         #  show_summary : bool = True,
         **kwargs
@@ -301,10 +352,12 @@ def train_autoencoder(prefix_name : str = 'Model',
          ## this is needed to use custom VAE because of symbolic operations
         n_bottleneck=int(n_inputs*compress_ratio)
         layers_structure= [int(architecture['n_factor']*n_inputs), int(n_bottleneck) ]  
-        model, vae_loss = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
+        # model, vae_loss = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
+        #                            loss = loss, lr=learning_rate, type_architecture = 'VAE',
+        #                            )
+        model = create_autoencoder(n_inputs=n_inputs, layers_structure=layers_structure, 
                                    loss = loss, lr=learning_rate, type_architecture = 'VAE',
-                                   )
-        
+                                   )        
 
 
     elif architecture['arch'] == 'custom_n_b':
@@ -328,14 +381,20 @@ def train_autoencoder(prefix_name : str = 'Model',
         else: # load existing model to return results
             LoadedModel=True
             # model.get_layer('dense_1')
-            model = load_model(encoder_path, custom_objects={'vae_loss': vae_loss})
+            model = load_model(encoder_path, custom_objects={'SamplingLayer': SamplingLayer, 'VAELossLayer':VAELossLayer})
 
     FailedTraining=False
     if not LoadedModel:
         try:
-            # fit the autoencoder model to reconstruct input
+            # logs = "logs/" 
+
+            # tboard_callback = tf.keras.callbacks.TensorBoard(log_dir = logs,
+            #                                      histogram_freq = 1,
+            #                                      profile_batch = '500,520')
             history = model.fit(X_train, X_train, epochs=epochs, batch_size=batch_size,
-                                verbose=2, validation_data=(X_test,X_test))
+                                verbose=2, validation_data=(X_test,X_test),
+                                # callbacks=[tboard_callback]
+                                )
             # plot loss
             print(f"COMPRESSED VECTOR SIZE: {n_bottleneck}")    
             pyplot.plot(history.history['loss'], label='train')
@@ -356,7 +415,7 @@ def train_autoencoder(prefix_name : str = 'Model',
     results=[ architecture_details, loss, batch_size, epochs, learning_rate,
             np.round(compress_ratio,4), n_bottleneck, mse_error_train, mse_error_val]
     
-    if not FailedTraining:
+    if not FailedTraining and get_test_results:
         results_model=get_results_model(model,X_test)
         pyplot.legend()
         pyplot.savefig(savedir+f"{name_encoder}.png")
@@ -413,6 +472,7 @@ def create_autoencoder(n_inputs : int = None,
                        layers_structure : list = None,
                        loss : str = 'mse',
                        lr : float = 0.001,
+                       kl_loss_coeff : float = 5e-4,
                        type_architecture : str = 'default',
                        conv_reduction : int = 2, ## only if type_architecture is convoluted
                        ):
@@ -482,16 +542,21 @@ def create_autoencoder(n_inputs : int = None,
                 d = Dense(neurons_per_layer[i])(d)
                 d = BatchNormalization()(d)
                 d = ReLU()(d)
-        
+
+    ## VAE architecture 
+    ## https://towardsdatascience.com/understanding-variational-autoencoders-vaes-f70510919f73
     elif type_architecture == 'VAE' :
         for i in range(num_layers-1):
             if i == 0:
                 e = Dense(neurons_per_layer[i], name=f'dense_enc{i}')(input_layer)
+                # e = Dropout(0.2)(e) # dropout layer to avoid overfitting
                 e = BatchNormalization()(e)
                 e = ReLU()(e)
+
                 # encoder_layers.append(Dense(neurons_per_layer[i], activation='relu')(BatchNormalization()(input_layer)))
             else:
                 e = Dense(neurons_per_layer[i], name=f'dense_enc{i}')(e)
+                # e = Dropout(0.2)(e) # dropout layer to avoid overfitting
                 e = BatchNormalization()(e)
                 e = ReLU()(e)
                 # encoder_layers.append(Dense(neurons_per_layer[i], activation='relu')(BatchNormalization()(encoder_layers[i-1])))
@@ -503,58 +568,66 @@ def create_autoencoder(n_inputs : int = None,
         z_log_var = Dense(latent_dim, name='bottleneck_zlog')(e)
 
         # Use sampling function to sample from latent space
-        encoder_output = Lambda(sampling,name='bottleneck')([z_mean, z_log_var])
+        # encoder_output = Lambda(sampling, output_shape=(latent_dim,), 
+        #                        name='bottleneck')([z_mean, z_log_var])
+        encoder_output = SamplingLayer(name='bottleneck')([z_mean, z_log_var])
         encoder = Model(input_layer, encoder_output, name="encoder_model")
 
-        decoder_input = Input(shape=(latent_dim,),name='input_dec') 
+        decoder_input = Input(shape=(latent_dim,),name='input_dec')
+        d = decoder_input 
         # Create the decoder layers
         # decoder_layers = []
         for i in range(num_layers-1, -1, -1):   
-            if i == num_layers-1:
-                d = Dense(neurons_per_layer[i], name=f'dense_dec{i}')(decoder_input)
+                d = Dense(neurons_per_layer[i], name=f'dense_dec{i}')(d)
+                # d = Dropout(0.2)(d) # dropout layer to avoid overfitting
                 d = BatchNormalization()(d)
                 d = ReLU()(d)
-            else:
-                d = Dense(neurons_per_layer[i], name=f'dense_dec{i}')(d)
-                d = BatchNormalization()(d)
-                d = ReLU()(d)        
+                # dropout layer to avoid overfitting
+                # e = Dropout(0.2)(e) 
+    
 
         # The output layer is the same as the input layer
         # output_layer = Dense(n_inputs, activation='linear')(decoder_layers[-1])
         decoder_output = Dense(n_inputs, activation='linear', name='outputlayer')(d)
         decoder = Model(inputs=decoder_input, outputs=decoder_output, name="decoder_model")
         # Create the autoencoder model
-        autoencoder_output = decoder(encoder_output)   
+        decoder_output = decoder(encoder_output) 
+        autoencoder_output = VAELossLayer(loss=loss, kl_loss_coeff=kl_loss_coeff)([input_layer, decoder_output, z_mean, z_log_var])
+  
         autoencoder = Model(inputs=input_layer, outputs=autoencoder_output, name="VAE")
     
-    # Compile the model
-    if type_architecture == 'VAE' :
+        # # Compile the model
+        # if type_architecture == 'VAE' :
         # Add a custom loss function to account for the KL divergence
-        def vae_loss(x, x_decoded_mean):
-            ## Losses supported are binary_crossentropy, mean_squared_error, and log_cosh
-            if loss == 'binary_crossentropy':
-                xent_loss = binary_crossentropy(x, x_decoded_mean)
-            elif loss == 'mean_squared_error' or loss == 'mse':
-                xent_loss = keras_mean_squared_error(x, x_decoded_mean)
-            elif loss == 'log_cosh' or loss == 'logcosh':
-                xent_loss = log_cosh(x, x_decoded_mean)
-            else:
-                raise ValueError('Unsupported loss function for VAE')
-            kl_loss = -5e-4 * K.mean(
-                1 + z_log_var - K.square(z_mean) - K.exp(z_log_var), axis=-1)
-            return xent_loss + kl_loss
-        # save vae_loss to a file
-        # import dill as pickledill
-        # pickledill.dump(vae_loss,open(f"./VAE_{loss}_loss.pkl","wb"))
-        ## still error cannot pickle 'tensorflow.python.client._pywrap_tf_session.TF_Operation' object
+        # import tensorflow as tf
+        # from tensorflow import keras
+        # from tensorflow.keras import layers
+
+
+
+        # def vae_loss(x, x_decoded_mean):
+        #     ## Losses supported are binary_crossentropy, mean_squared_error, and log_cosh
+        #     if loss == 'binary_crossentropy':
+        #         xent_loss = tf.keras.losses.binary_crossentropy(x, x_decoded_mean)
+        #     elif loss == 'mean_squared_error' or loss == 'mse':
+        #         xent_loss = tf.keras.losses.mean_squared_error(x, x_decoded_mean)
+        #     elif loss == 'log_cosh' or loss == 'logcosh':
+        #         xent_loss = tf.math.log(tf.math.cosh(x - x_decoded_mean))
+        #     else:
+        #         raise ValueError('Unsupported loss function for VAE')
+
+        #     kl_loss = 1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var)
+        #     kl_loss = tf.reduce_sum(kl_loss, axis=-1)
+        #     kl_loss *= -0.5
+        #     vae_loss = tf.keras.backend.mean(xent_loss + kl_loss_coeff*kl_loss)
+        #     return vae_loss
+
         
-        # kl_loss = -5e-4 * mean( 1 + z_log_var - square(z_mean) - exp(z_log_var), axis=-1)
-        # vae_loss = xent_loss + kl_loss
-        # autoencoder.add_loss(vae_loss)
-        autoencoder.compile(optimizer='adam', loss=vae_loss)
+        autoencoder.compile(optimizer='adam', loss=None)
         autoencoder.summary()
-        return autoencoder, vae_loss
-        
+        # return autoencoder, vae_loss    
+        return autoencoder
+  
     else:
         autoencoder.compile_model( optimizer=Adam(learning_rate=lr), loss = loss)
         autoencoder.summary()
