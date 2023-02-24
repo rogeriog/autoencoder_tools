@@ -399,9 +399,9 @@ def train_autoencoder(prefix_name : str = 'Model',
             print(f"COMPRESSED VECTOR SIZE: {n_bottleneck}")    
             pyplot.plot(history.history['loss'], label='train')
             pyplot.plot(history.history['val_loss'], label='test')
-            print(f"Loss in the autoencoder: {history.history['val_loss'][-1]}")
-            mse_error_train=history.history['loss'][-1]
-            mse_error_val=history.history['val_loss'][-1]
+            print(f"MSE loss in the autoencoder: {history.history['val_mse'][-1]}")
+            mse_error_train = history.history['mse'][-1]
+            mse_error_val = history.history['val_mse'][-1]
         except Exception as e:
             print(e)
             print("Training of this model failed.")
@@ -623,13 +623,14 @@ def create_autoencoder(n_inputs : int = None,
         #     return vae_loss
 
         
-        autoencoder.compile(optimizer='adam', loss=None)
+        autoencoder.compile(optimizer='adam', loss=None, metrics=['mse'])
         autoencoder.summary()
         # return autoencoder, vae_loss    
         return autoencoder
   
     else:
-        autoencoder.compile_model( optimizer=Adam(learning_rate=lr), loss = loss)
+        autoencoder.compile_model( optimizer=Adam(learning_rate=lr), loss = loss,
+                                  metrics=['mse'])
         autoencoder.summary()
         return autoencoder
 
